@@ -1,9 +1,9 @@
 """
 Generate synthetic A/B experiment datasets with known ground truth.
 
-Scenarios (combinable via CLI flags):
-  clean_experiment, srm_injected, novelty_effect, noncompliance,
-  heterogeneous_effects, no_effect
+Used by the unit tests (and handy for manual experimentation). Scenarios:
+  clean_experiment, srm_injected, novelty_effect, heterogeneous_effects,
+  no_effect
 """
 
 from __future__ import annotations
@@ -61,9 +61,8 @@ def _add_metric(
     covariate_correlations: tuple[float, float] = (0.4, 0.2),
     heterogeneous: bool = False,
     novelty: bool = False,
-    noncompliance_rate: float = 0.0,
 ) -> pd.DataFrame:
-    """Add outcome metric with optional effect modifiers and violations."""
+    """Add outcome metric with optional effect modifiers."""
     rng = np.random.default_rng(seed)
     out = df.copy()
 
@@ -94,26 +93,11 @@ def _add_metric(
         multiplier = tercile.map(decay).to_numpy()
         effect = effect * multiplier
 
-    # Noncompliance: some control-labeled users actually receive treatment effect
+    # Apply the (possibly heterogeneous / decaying) effect to the treatment arm.
     treat_lift = effect * (out["treatment"] == 1).to_numpy().astype(float)
     metric = metric + treat_lift
 
-    # Noncompliance: inflate outcomes for a subset of control-labeled users
-    if noncompliance_rate > 0:
-        control_mask = out["treatment"] == 0
-        n_control = int(control_mask.sum())
-        n_cross = int(n_control * noncompliance_rate)
-        if n_cross > 0:
-            control_idx = np.where(control_mask)[0]
-            cross_idx = rng.choice(control_idx, size=n_cross, replace=False)
-            ctrl_mean = metric[control_mask].mean()
-            treat_mean = metric[out["treatment"] == 1].mean()
-            crossover_bump = max(1.15, (treat_mean - ctrl_mean) + true_ate * 5.0)
-            metric[cross_idx] = metric[cross_idx] + crossover_bump
     out["metric"] = metric
-    if "_actual_treatment" in out.columns:
-        out = out.drop(columns=["_actual_treatment"])
-
     return out
 
 
@@ -137,7 +121,7 @@ def generate_experiment(
         Random seed for reproducibility.
     scenario : str
         One of: clean_experiment, srm_injected, novelty_effect,
-        noncompliance, heterogeneous_effects, no_effect.
+        heterogeneous_effects, no_effect.
     treatment_ratio : float, optional
         Override assignment probability to treatment arm.
     inject_outliers : bool
@@ -156,7 +140,6 @@ def generate_experiment(
     true_ate = 0.15
     heterogeneous = False
     novelty = False
-    noncompliance_rate = 0.0
 
     if scenario == "clean_experiment":
         pass
@@ -165,8 +148,6 @@ def generate_experiment(
     elif scenario == "novelty_effect":
         novelty = True
         true_ate = 0.20
-    elif scenario == "noncompliance":
-        noncompliance_rate = 0.10
     elif scenario == "heterogeneous_effects":
         heterogeneous = True
         true_ate = 0.20
@@ -185,7 +166,6 @@ def generate_experiment(
         true_ate=true_ate,
         heterogeneous=heterogeneous,
         novelty=novelty,
-        noncompliance_rate=noncompliance_rate,
     )
 
     rng = np.random.default_rng(seed + 2)
@@ -219,7 +199,6 @@ def main() -> None:
             "clean_experiment",
             "srm_injected",
             "novelty_effect",
-            "noncompliance",
             "heterogeneous_effects",
             "no_effect",
         ],

@@ -1,7 +1,5 @@
 """Unit tests for data ingestion and validation."""
 
-from pathlib import Path
-
 import pandas as pd
 import pytest
 
@@ -10,16 +8,15 @@ from pipeline.ingest import (
     check_duplicate_users,
     check_invalid_treatment,
     check_nulls,
+    encode_treatment,
     run_ingest,
     validate_schema,
 )
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
 
 @pytest.fixture
 def fixture_clean() -> pd.DataFrame:
-    return pd.read_csv(FIXTURES_DIR / "fixture_clean.csv", parse_dates=["timestamp"])
+    return generate_experiment(n_users=2000, seed=42, scenario="clean_experiment")
 
 
 def _base_df() -> pd.DataFrame:
@@ -145,3 +142,74 @@ class TestSchemaHelper:
         _, schema = validate_schema(df)
         assert schema["status"] == "fail"
         assert schema["missing_columns"] == ["treatment"]
+
+
+class TestTreatmentEncoding:
+    def test_numeric_0_1_passthrough(self) -> None:
+        enc, rep = encode_treatment(pd.Series([0, 1, 1, 0]))
+        assert rep["method"] == "numeric_0_1"
+        assert enc.tolist() == [0, 1, 1, 0]
+
+    def test_control_treatment_labels(self) -> None:
+        df = _base_df()
+        df["treatment"] = ["control", "treatment", "control", "treatment"]
+        cleaned, report = run_ingest(df)
+        assert report["treatment_encoding"]["method"] == "auto_label"
+        assert set(cleaned["treatment"].unique()) == {0, 1}
+        assert len(cleaned) == 4
+
+    def test_a_b_labels(self) -> None:
+        enc, rep = encode_treatment(pd.Series(["A", "B", "B", "A"]))
+        assert rep["method"] == "auto_label"
+        assert enc.tolist() == [0, 1, 1, 0]
+
+    def test_boolean_treatment(self) -> None:
+        enc, rep = encode_treatment(pd.Series([True, False, True, False]))
+        assert rep["method"] == "boolean"
+        assert enc.tolist() == [1, 0, 1, 0]
+
+    def test_explicit_mapping_takes_precedence(self) -> None:
+        df = _base_df()
+        df["treatment"] = ["grp_x", "grp_y", "grp_x", "grp_y"]
+        cleaned, report = run_ingest(df, treatment_mapping={"grp_x": 0, "grp_y": 1})
+        assert report["treatment_encoding"]["method"] == "explicit_mapping"
+        assert set(cleaned["treatment"].unique()) == {0, 1}
+
+    def test_unrecognized_labels_fail_with_guidance(self) -> None:
+        df = _base_df()
+        df["treatment"] = ["red", "blue", "red", "blue"]
+        cleaned, report = run_ingest(df)
+        enc = report["treatment_encoding"]
+        assert enc["status"] == "fail"
+        assert report["overall"] == "fail"
+        assert "treatment_mapping" in enc["message"]
+
+    def test_more_than_two_arms_flagged(self) -> None:
+        df = pd.DataFrame(
+            {
+                "user_id": ["a", "b", "c"],
+                "treatment": ["control", "variant_b", "variant_c"],
+                "timestamp": pd.date_range("2024-01-01", periods=3),
+                "metric": [1.0, 2.0, 3.0],
+            }
+        )
+        _, report = run_ingest(df)
+        enc = report["treatment_encoding"]
+        assert enc["status"] == "fail"
+        assert enc["n_distinct_arms"] == 3
+
+    def test_select_two_of_three_arms_via_mapping(self) -> None:
+        df = pd.DataFrame(
+            {
+                "user_id": ["a", "b", "c", "d"],
+                "treatment": ["control", "variant_b", "variant_c", "control"],
+                "timestamp": pd.date_range("2024-01-01", periods=4),
+                "metric": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
+        cleaned, report = run_ingest(
+            df, treatment_mapping={"control": 0, "variant_b": 1}
+        )
+        # variant_c is unmapped -> NaN -> dropped as a null row.
+        assert set(cleaned["treatment"].unique()) == {0, 1}
+        assert len(cleaned) == 3

@@ -5,4 +5,8 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+.Rhistory
 .env
+
+# Cached external validation datasets (fetched on demand)
+validation/data/
